@@ -23,106 +23,112 @@
 (require 'cl-lib)
 
 ;; Mock claude-code-ide dependencies before loading companion
-(defvar claude-code-ide-buffer-name-function
-  (lambda (dir)
-    (format "*claude-code[%s]*" (file-name-nondirectory (directory-file-name dir)))))
+(cl-defstruct claude-code-ide-mcp-session
+  session-id instance-name buffer process last-used project-dir)
 
-(defvar claude-code-ide--processes (make-hash-table :test 'equal))
+(defvar claude-code-ide-companion-tests--sessions nil
+  "Mock session registry.")
+
+(defun claude-code-ide-mcp--active-sessions ()
+  "Mock: return all sessions."
+  claude-code-ide-companion-tests--sessions)
+
+(defun claude-code-ide-mcp--sessions-for-project (project-dir)
+  "Mock: return sessions for PROJECT-DIR."
+  (cl-remove-if-not (lambda (s) (equal (claude-code-ide-mcp-session-project-dir s)
+                                       project-dir))
+                    claude-code-ide-companion-tests--sessions))
 
 (defun claude-code-ide--get-working-directory ()
   "Mock: return current project directory."
   default-directory)
 
-(defun claude-code-ide--get-process (&optional directory)
-  "Mock: return process for DIRECTORY."
-  (gethash (or directory default-directory) claude-code-ide--processes))
-
 (defun claude-code-ide--display-buffer-in-side-window (_buffer)
   "Mock: display BUFFER in side window."
   nil)
 
+(provide 'claude-code-ide-mcp)
 (provide 'claude-code-ide)
 
 (require 'claude-code-ide-companion)
 
 ;;; Helpers
 
-(defun claude-code-ide-companion-tests--clear-processes ()
-  "Clear all registered processes."
-  (clrhash claude-code-ide--processes))
+(defmacro claude-code-ide-companion-tests--with-sessions (sessions &rest body)
+  "Run BODY with the mock registry bound to SESSIONS."
+  (declare (indent 1))
+  `(let ((claude-code-ide-companion-tests--sessions ,sessions))
+     ,@body))
+
+(defun claude-code-ide-companion-tests--session (dir buffer &optional process last-used)
+  "Make a mock session for DIR with BUFFER, PROCESS and LAST-USED."
+  (make-claude-code-ide-mcp-session
+   :project-dir dir :buffer buffer :process process :last-used last-used))
 
 ;;; Tests
 
 (ert-deftest claude-code-ide-companion-test-close-visible-sessions ()
   "Test that visible Claude windows are closed."
-  (claude-code-ide-companion-tests--clear-processes)
-  (unwind-protect
-      (let* ((buf1 (get-buffer-create "*claude-code[project1]*"))
-             (buf2 (get-buffer-create "*claude-code[project2]*"))
-             (deleted-windows '())
-             (mock-process 'mock-process))
-        (puthash "/dir/project1" mock-process claude-code-ide--processes)
-        (puthash "/dir/project2" mock-process claude-code-ide--processes)
-        (cl-letf (((symbol-function 'get-buffer-window)
-                   (lambda (buf)
-                     (cond
-                      ((eq buf buf1) 'win1)
-                      ((eq buf buf2) nil)
-                      (t nil))))
-                  ((symbol-function 'delete-window)
-                   (lambda (win) (push win deleted-windows))))
-          (claude-code-ide-companion--close-visible-sessions)
-          (should (member 'win1 deleted-windows))
-          (should (= (length deleted-windows) 1)))
-        (kill-buffer buf1)
-        (kill-buffer buf2))
-    (claude-code-ide-companion-tests--clear-processes)))
+  (let* ((buf1 (get-buffer-create "*claude-code[project1]*"))
+         (buf2 (get-buffer-create "*claude-code[project2]*"))
+         (deleted-windows '()))
+    (unwind-protect
+        (claude-code-ide-companion-tests--with-sessions
+            (list (claude-code-ide-companion-tests--session "/dir/project1/" buf1)
+                  (claude-code-ide-companion-tests--session "/dir/project2/" buf2))
+          (cl-letf (((symbol-function 'get-buffer-window)
+                     (lambda (buf) (when (eq buf buf1) 'win1)))
+                    ((symbol-function 'delete-window)
+                     (lambda (win) (push win deleted-windows))))
+            (claude-code-ide-companion--close-visible-sessions)
+            (should (equal deleted-windows '(win1)))))
+      (kill-buffer buf1)
+      (kill-buffer buf2))))
 
 (ert-deftest claude-code-ide-companion-test-on-context-switch-shows-session ()
-  "Test that switching to a project with a session displays its buffer."
-  (claude-code-ide-companion-tests--clear-processes)
-  (unwind-protect
-      (let* ((project-dir "/test/project/")
-             (buf (get-buffer-create "*claude-code[project]*"))
-             (mock-process (start-process "mock-live" nil "sleep" "60"))
-             (displayed-buffer nil))
-        (puthash project-dir mock-process claude-code-ide--processes)
-        (cl-letf (((symbol-function 'claude-code-ide--get-working-directory)
-                   (lambda () project-dir))
-                  ((symbol-function 'claude-code-ide-companion--close-visible-sessions)
-                   (lambda () nil))
-                  ((symbol-function 'process-live-p)
-                   (lambda (proc) (eq proc mock-process)))
-                  ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
-                   (lambda (buf) (setq displayed-buffer buf))))
-          (claude-code-ide-companion--on-context-switch)
-          (should (eq displayed-buffer buf)))
-        (delete-process mock-process)
-        (kill-buffer buf))
-    (claude-code-ide-companion-tests--clear-processes)))
+  "Test that switching to a project shows its most recently used live session."
+  (let* ((project-dir "/test/project/")
+         (old-buf (get-buffer-create "*claude-code[project:old]*"))
+         (new-buf (get-buffer-create "*claude-code[project]*"))
+         (dead-buf (get-buffer-create "*claude-code[project:dead]*"))
+         (live (start-process "mock-live" nil "sleep" "60"))
+         (displayed-buffer nil))
+    (unwind-protect
+        (claude-code-ide-companion-tests--with-sessions
+            (list (claude-code-ide-companion-tests--session project-dir old-buf live 1.0)
+                  (claude-code-ide-companion-tests--session project-dir new-buf live 2.0)
+                  (claude-code-ide-companion-tests--session project-dir dead-buf nil 3.0))
+          (cl-letf (((symbol-function 'claude-code-ide--get-working-directory)
+                     (lambda () project-dir))
+                    ((symbol-function 'claude-code-ide-companion--close-visible-sessions)
+                     #'ignore)
+                    ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
+                     (lambda (buf) (setq displayed-buffer buf))))
+            (claude-code-ide-companion--on-context-switch)
+            (should (eq displayed-buffer new-buf))))
+      (delete-process live)
+      (mapc #'kill-buffer (list old-buf new-buf dead-buf)))))
 
 (ert-deftest claude-code-ide-companion-test-on-context-switch-closes-windows-no-session ()
   "Test that switching to a project without a session closes visible Claude windows."
-  (claude-code-ide-companion-tests--clear-processes)
-  (unwind-protect
-      (let* ((other-dir "/test/other/")
-             (other-buf (get-buffer-create "*claude-code[other]*"))
-             (mock-process (start-process "mock-other" nil "sleep" "60"))
-             (close-visible-called nil)
-             (displayed-buffer nil))
-        (puthash other-dir mock-process claude-code-ide--processes)
-        (cl-letf (((symbol-function 'claude-code-ide--get-working-directory)
-                   (lambda () "/test/new-project/"))
-                  ((symbol-function 'claude-code-ide-companion--close-visible-sessions)
-                   (lambda () (setq close-visible-called t)))
-                  ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
-                   (lambda (buf) (setq displayed-buffer buf))))
-          (claude-code-ide-companion--on-context-switch)
-          (should close-visible-called)
-          (should (null displayed-buffer)))
-        (delete-process mock-process)
-        (kill-buffer other-buf))
-    (claude-code-ide-companion-tests--clear-processes)))
+  (let* ((other-buf (get-buffer-create "*claude-code[other]*"))
+         (live (start-process "mock-other" nil "sleep" "60"))
+         (close-visible-called nil)
+         (displayed-buffer nil))
+    (unwind-protect
+        (claude-code-ide-companion-tests--with-sessions
+            (list (claude-code-ide-companion-tests--session "/test/other/" other-buf live))
+          (cl-letf (((symbol-function 'claude-code-ide--get-working-directory)
+                     (lambda () "/test/new-project/"))
+                    ((symbol-function 'claude-code-ide-companion--close-visible-sessions)
+                     (lambda () (setq close-visible-called t)))
+                    ((symbol-function 'claude-code-ide--display-buffer-in-side-window)
+                     (lambda (buf) (setq displayed-buffer buf))))
+            (claude-code-ide-companion--on-context-switch)
+            (should close-visible-called)
+            (should (null displayed-buffer))))
+      (delete-process live)
+      (kill-buffer other-buf))))
 
 (ert-deftest claude-code-ide-companion-test-mode-installs-advice ()
   "Test that enabling the mode installs advice."

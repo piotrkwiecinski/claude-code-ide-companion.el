@@ -4,7 +4,7 @@
 
 ;; Author: Piotr Kwiecinski
 ;; Version: 0.1.0
-;; Package-Requires: ((emacs "28.1") (claude-code-ide "0.2.6"))
+;; Package-Requires: ((emacs "28.1") (claude-code-ide "0.3.0"))
 ;; Keywords: ai, claude, code, assistant
 ;; URL: https://github.com/piotrkwiecinski/claude-code-ide-companion.el
 
@@ -38,36 +38,49 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'claude-code-ide)
+(require 'claude-code-ide-mcp)
 
 (defgroup claude-code-ide-companion nil
   "Extra features for Claude Code IDE."
   :group 'claude-code-ide
   :prefix "claude-code-ide-companion-")
 
+(defun claude-code-ide-companion--live-session-p (session)
+  "Return non-nil when SESSION has a live buffer and terminal process."
+  (let ((buffer (claude-code-ide-mcp-session-buffer session))
+        (process (claude-code-ide-mcp-session-process session)))
+    (and buffer (buffer-live-p buffer)
+         process (process-live-p process))))
+
+(defun claude-code-ide-companion--project-session (directory)
+  "Return the most recently used live session for DIRECTORY, or nil."
+  (car (sort (cl-remove-if-not #'claude-code-ide-companion--live-session-p
+                               (claude-code-ide-mcp--sessions-for-project directory))
+             (lambda (a b)
+               (> (or (claude-code-ide-mcp-session-last-used a) 0)
+                  (or (claude-code-ide-mcp-session-last-used b) 0))))))
+
 (defun claude-code-ide-companion--close-visible-sessions ()
   "Close all visible Claude Code side windows."
-  (maphash (lambda (directory _)
-             (let* ((buf-name (funcall claude-code-ide-buffer-name-function directory))
-                    (buf (get-buffer buf-name)))
-               (when-let ((win (and buf (get-buffer-window buf))))
-                 (delete-window win))))
-           claude-code-ide--processes))
+  (dolist (session (claude-code-ide-mcp--active-sessions))
+    (when-let* ((buf (claude-code-ide-mcp-session-buffer session))
+                ((buffer-live-p buf))
+                (win (get-buffer-window buf)))
+      (delete-window win))))
 
 (defun claude-code-ide-companion--on-context-switch (&rest _args)
   "Update Claude Code side window after switching projects.
-If a Claude Code session exists for the current project, display it.
-Otherwise, close any visible Claude Code side windows."
-  (let* ((new-dir (claude-code-ide--get-working-directory))
-         (new-buffer-name (funcall claude-code-ide-buffer-name-function new-dir))
-         (new-buffer (get-buffer new-buffer-name))
-         (new-process (claude-code-ide--get-process new-dir)))
+If a Claude Code session exists for the current project, display its
+most recently used instance.  Otherwise, close any visible Claude Code
+side windows."
+  (let ((session (claude-code-ide-companion--project-session
+                  (claude-code-ide--get-working-directory))))
     (claude-code-ide-companion--close-visible-sessions)
-    (when (and new-buffer
-               (buffer-live-p new-buffer)
-               new-process
-               (process-live-p new-process))
-      (claude-code-ide--display-buffer-in-side-window new-buffer))))
+    (when session
+      (claude-code-ide--display-buffer-in-side-window
+       (claude-code-ide-mcp-session-buffer session)))))
 
 ;;;###autoload
 (define-minor-mode claude-code-ide-companion-project-switch-mode
