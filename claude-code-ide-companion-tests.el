@@ -23,8 +23,11 @@
 (require 'cl-lib)
 
 ;; Mock claude-code-ide dependencies before loading companion
+;; Slot order must match the real struct: the companion is byte-compiled
+;; against claude-code-ide, which inlines accessors by slot index.
 (cl-defstruct claude-code-ide-mcp-session
-  session-id instance-name buffer process last-used project-dir)
+  session-id instance-name buffer process window-slot last-used
+  cleanup-done server client port project-dir)
 
 (defvar claude-code-ide-companion-tests--sessions nil
   "Mock session registry.")
